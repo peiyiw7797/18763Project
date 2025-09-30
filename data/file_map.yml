@@ -1,0 +1,17 @@
+male:
+  2015: players_15.csv
+  2016: players_16.csv
+  2017: players_17.csv
+  2018: players_18.csv
+  2019: players_19.csv
+  2020: players_20.csv
+  2021: players_21.csv
+  2022: players_22.csv
+female:
+  2016: female_players_16.csv
+  2017: female_players_17.csv
+  2018: female_players_18.csv
+  2019: female_players_19.csv
+  2020: female_players_20.csv
+  2021: female_players_21.csv
+  2022: female_players_22.csv
