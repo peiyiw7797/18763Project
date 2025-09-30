@@ -2,7 +2,7 @@
 
 This repository provides reference Python implementations for the first two tasks of the Course Project.
 It contains repeatable scripts that (1) build and populate the PostgreSQL data warehouse requested in
-Task I and (2) expose Apache Spark analytics required in Task II, including the YouTube comment
+Task I and (2) expose PostgreSQL analytics required in Task II, including the YouTube comment
 publisher/subscriber workflow.
 
 ## Repository Structure
@@ -11,7 +11,7 @@ publisher/subscriber workflow.
 .
 ├── Course_Project_1 (1).pdf      # Original project description
 ├── README.md                     # This document
-├── requirements.txt              # Python dependencies
+├── requirements.txt              # Python dependencies (no pandas / Spark)
 ├── data/
 │   ├── README.md                 # Dataset download instructions
 │   └── file_map.yml              # Expected CSV filenames per year
@@ -19,14 +19,14 @@ publisher/subscriber workflow.
     ├── __init__.py
     ├── config.py                 # Configuration helpers
     ├── db_utils.py               # PostgreSQL utilities and schema management
-    ├── task1_load.py             # Task I ingestion workflow
-    ├── task2_analytics.py        # Spark analytics for Task II
+    ├── task1_load.py             # Task I ingestion workflow (pure SQL)
+    ├── task2_analytics.py        # PostgreSQL analytics for Task II
     └── youtube_pubsub.py         # Publisher/subscriber utilities for Task II (Q5)
 ```
 
 ## Environment Setup
 
-1.  Install Python 3.10+ and Java 8/11 (required for PySpark).
+1.  Install Python 3.10+.
 2.  Create and activate a virtual environment.
 3.  Install dependencies:
 
@@ -78,9 +78,9 @@ python -m src.task1_load --data-dir data
 The script performs the following steps:
 
 1.  Loads the CSV filename mapping from `data/file_map.yml`.
-2.  Creates the `fifa` schema (if missing) and a unified `fifa.players` table with data types inferred from the CSV files.
+2.  Creates the `fifa` schema (if missing) and a unified `fifa.players` table with strongly typed columns tailored to the course deliverables.
 3.  Normalizes column headers across seasons, adds a `year` column, and inserts a `player_uid` synthetic key to guarantee uniqueness.
-4.  Uploads the consolidated dataframe into PostgreSQL using batch inserts.
+4.  Performs all cleansing and type conversions with standard Python modules before issuing batched PostgreSQL `INSERT` commands (no pandas involved).
 5.  Records ingestion metadata (row counts, years covered, and file hashes) in the `fifa.ingestion_log` table.
 
 The script is idempotent—it truncates the existing `fifa.players` table before loading so that re-runs start from a clean slate.
@@ -106,12 +106,12 @@ consistent tabular schemas and require strong typing, relational joins, and SQL 
 like `contract_valid_until`, `club_name`, and `nationality_name` are naturally expressed as columns
 and benefit from indexing and declarative constraints. While a graph database such as Neo4J could
 model player relationships, it would add operational overhead without delivering clear advantages
-for the required aggregations (counts, averages, rankings). PostgreSQL also integrates seamlessly
-with Spark's JDBC connector, simplifying Task II.
+for the required aggregations (counts, averages, rankings). Keeping the full workload inside
+PostgreSQL also simplifies deployment because there is no additional Spark cluster to maintain.
 
-## Task II – Spark Analytics
+## Task II – PostgreSQL Analytics
 
-Spark-based analytics are implemented in `src/task2_analytics.py`. They can be executed either as Python functions (import the module) or through the CLI wrapper:
+PostgreSQL-based analytics are implemented in `src/task2_analytics.py`. They can be executed either as Python functions (import the module) or through the CLI wrapper:
 
 ```bash
 # Example invocations
@@ -125,15 +125,15 @@ python -m src.task2_analytics youtube --limit 250 --dump-path data/youtube_comme
 ### Available Analytics
 
 1.  **Contract Expirations** – `top_clubs_with_expiring_contracts`
-    * Returns the clubs with the highest number of players whose `contract_valid_until` year is at least the specified threshold.
+    * Executes a PostgreSQL window-function query to return the clubs with the highest number of players whose `contract_valid_until` year is at least the specified threshold.
     * Results include ties for the last place when counts match.
 
 2.  **Average Age Ranking** – `rank_clubs_by_average_age`
-    * Calculates average age per club in the chosen season and supports ascending/descending order.
+    * Calculates average age per club in the chosen season using SQL averages and supports ascending/descending order.
     * Validates user inputs and preserves ties for the final rank.
 
 3.  **Most Popular Nationality per Year** – `most_popular_nationality_by_year`
-    * Produces a dictionary (or Spark dataframe) summarizing the most frequent nationality for each season.
+    * Produces a PostgreSQL result set summarizing the most frequent nationality for each season.
 
 4.  **Nationality Histogram** – `nationality_histogram`
     * Deduplicates players across seasons using their `sofifa_id` and plots the nationality distribution with Matplotlib. The histogram can be saved or displayed.
@@ -142,13 +142,13 @@ python -m src.task2_analytics youtube --limit 250 --dump-path data/youtube_comme
     * Uses the publisher/subscriber model in `youtube_pubsub.py` to collect comment streams from recent videos retrieved with the YouTube Data API.
     * Aggregates mentions of `short_name` values from the 2022 roster and returns the player with the highest mention count. The raw comment dump is persisted for grading evidence.
 
-Each function automatically pulls data from PostgreSQL through Spark’s JDBC connector. Connection properties are reused from `FIFA_DB_URL`.
+Each function issues SQL queries directly against PostgreSQL using SQLAlchemy connections. Connection properties are reused from `FIFA_DB_URL`.
 
 ## Explaining the Assignment
 
 The Course Project asks students to build an end-to-end data pipeline and analytical stack around the FIFA player dataset:
 
 * **Task I** focuses on data engineering—standardizing CSV files from multiple seasons, merging male and female rosters, creating a dedicated schema in PostgreSQL, and ensuring every row can be uniquely identified. The README must also discuss feature descriptions and whether a NoSQL option would be preferable. This repository supplies scripts and documentation to meet those requirements.
-* **Task II** moves to distributed analytics using Apache Spark. Students must implement parameterized queries for contract expiration trends, age-based club rankings, yearly nationality leaders, and deduplicated nationality histograms. Additionally, they must integrate external data (YouTube comments) using a publisher/subscriber pattern to determine the most discussed player for 2022.
+* **Task II** moves to analytical SQL over PostgreSQL. Students must implement parameterized queries for contract expiration trends, age-based club rankings, yearly nationality leaders, and deduplicated nationality histograms. Additionally, they must integrate external data (YouTube comments) using a publisher/subscriber pattern to determine the most discussed player for 2022.
 
 Combined, these deliverables demonstrate proficiency in database design, scalable ETL, distributed query processing, and streaming/text analytics, forming the foundation for later machine learning and deployment tasks.

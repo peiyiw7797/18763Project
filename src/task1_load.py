@@ -1,17 +1,30 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import hashlib
 import json
+import re
 from pathlib import Path
-from typing import Dict, Iterable, Tuple
-
-import pandas as pd
+from typing import Dict, Iterable, Iterator, List, Tuple
 
 from .config import ConfigError, get_database_config, load_file_map
 from .db_utils import create_db_engine, log_ingestion, write_players_table
 
-EXPECTED_COLUMNS = {
+NUMERIC_COLUMNS = {
+    "overall",
+    "potential",
+    "value_eur",
+    "wage_eur",
+    "release_clause_eur",
+    "height_cm",
+    "weight_kg",
+    "age",
+    "contract_valid_until",
+}
+
+
+BASE_COLUMNS = {
     "sofifa_id",
     "short_name",
     "long_name",
@@ -33,12 +46,14 @@ EXPECTED_COLUMNS = {
 
 COLUMN_ALIASES = {
     "nationality": "nationality_name",
-    "nationality_name": "nationality_name",
-    "team_jersey_number": "club_jersey_number",
     "club": "club_name",
     "club_contract_valid_until": "contract_valid_until",
     "contract": "contract_valid_until",
     "contract_end_year": "contract_valid_until",
+    "short_name": "short_name",
+    "name": "short_name",
+    "long_name": "long_name",
+    "full_name": "long_name",
 }
 
 
@@ -55,6 +70,8 @@ def normalize_column(name: str) -> str:
 
 
 def hash_file(path: Path, chunk_size: int = 65536) -> str:
+    """Return the SHA-256 hash for the given file."""
+
     digest = hashlib.sha256()
     with path.open("rb") as handle:
         for chunk in iter(lambda: handle.read(chunk_size), b""):
@@ -62,100 +79,119 @@ def hash_file(path: Path, chunk_size: int = 65536) -> str:
     return digest.hexdigest()
 
 
-def read_csv(path: Path) -> pd.DataFrame:
-    """Load a CSV file with pandas, preserving column types when possible."""
+def to_int(value: str | None) -> int | None:
+    """Convert string values to integers, ignoring blanks and invalid entries."""
 
-    return pd.read_csv(path, low_memory=False)
-
-
-def standardize_dataframe(
-    frame: pd.DataFrame, *, year: int, gender: str
-) -> pd.DataFrame:
-    """Apply column normalization and add metadata fields."""
-
-    rename_map = {col: normalize_column(col) for col in frame.columns}
-    frame = frame.rename(columns=rename_map)
-    frame = frame.rename(columns=COLUMN_ALIASES)
-
-    if "nationality_name" not in frame.columns and "nationality" in frame.columns:
-        frame = frame.rename(columns={"nationality": "nationality_name"})
-
-    frame["year"] = year
-    frame["gender"] = gender
-
-    if "sofifa_id" not in frame.columns:
-        if "player_url" in frame.columns:
-            frame["sofifa_id"] = (
-                frame["player_url"].astype(str).str.extract(r"(\d+)", expand=False)
-            )
-        else:
-            raise ConfigError(
-                "Missing `sofifa_id` column and unable to infer it from player_url."
-            )
-    frame["sofifa_id"] = frame["sofifa_id"].astype("Int64")
-
-    if "short_name" not in frame.columns and "name" in frame.columns:
-        frame["short_name"] = frame["name"]
-
-    if "long_name" not in frame.columns and "full_name" in frame.columns:
-        frame["long_name"] = frame["full_name"]
-
-    if "contract_valid_until" in frame.columns:
-        frame["contract_valid_until"] = frame["contract_valid_until"].astype("Int64")
-    else:
-        frame["contract_valid_until"] = pd.NA
-
-    if "age" in frame.columns:
-        frame["age"] = frame["age"].astype("Int64")
-
-    frame["player_uid"] = (
-        frame["gender"].str[0].str.upper()
-        + "_"
-        + frame["year"].astype(str)
-        + "_"
-        + frame["sofifa_id"].astype(str)
-    )
-    frame = frame.drop_duplicates(subset=["player_uid"], keep="last")
-
-    # Ensure all expected columns exist
-    for column in EXPECTED_COLUMNS:
-        if column not in frame.columns:
-            frame[column] = pd.NA
-
-    ordered_columns = [
-        "player_uid",
-        "year",
-        "gender",
-        "sofifa_id",
-        "short_name",
-        "long_name",
-        "club_name",
-        "league_name",
-        "contract_valid_until",
-        "age",
-        "nationality_name",
-    ] + sorted(col for col in frame.columns if col not in {
-        "player_uid",
-        "year",
-        "gender",
-        "sofifa_id",
-        "short_name",
-        "long_name",
-        "club_name",
-        "league_name",
-        "contract_valid_until",
-        "age",
-        "nationality_name",
-    })
-    frame = frame[ordered_columns]
-    return frame.reset_index(drop=True)
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text or text.lower() in {"na", "nan", "null", "none"}:
+        return None
+    try:
+        if "." in text:
+            return int(float(text))
+        return int(text)
+    except ValueError:
+        return None
 
 
-def load_players(data_dir: Path, file_map: Dict[str, Dict[int, str]]) -> Tuple[pd.DataFrame, Dict[str, Dict[str, str]]]:
-    """Read all configured CSV files and return a unified dataframe plus metadata."""
+def extract_sofifa_id(data: Dict[str, str]) -> int | None:
+    """Extract the sofifa identifier from available columns."""
 
-    frames: list[pd.DataFrame] = []
-    metadata: Dict[str, Dict[str, str]] = {}
+    sofifa = to_int(data.get("sofifa_id"))
+    if sofifa is not None:
+        return sofifa
+    url = data.get("player_url") or data.get("playerid_url")
+    if url:
+        match = re.search(r"(\d+)", str(url))
+        if match:
+            return to_int(match.group(1))
+    return None
+
+
+def normalize_record(
+    row: Dict[str, str], *, year: int, gender: str
+) -> Dict[str, object]:
+    """Convert a raw CSV row into the canonical record representation."""
+
+    normalized = {normalize_column(key): value for key, value in row.items()}
+    renamed: Dict[str, str] = {}
+    for key, value in normalized.items():
+        target = COLUMN_ALIASES.get(key, key)
+        renamed[target] = value
+
+    if "nationality_name" not in renamed:
+        renamed["nationality_name"] = normalized.get("nationality")
+
+    sofifa_id = extract_sofifa_id(renamed)
+    if sofifa_id is None:
+        raise ConfigError("Unable to determine sofifa_id for a player record.")
+
+    short_name = renamed.get("short_name") or renamed.get("name")
+    long_name = renamed.get("long_name") or renamed.get("full_name")
+
+    record: Dict[str, object] = {
+        "player_uid": f"{gender[0].upper()}_{year}_{sofifa_id}",
+        "year": year,
+        "gender": gender,
+        "sofifa_id": sofifa_id,
+        "short_name": (short_name or "").strip() or None,
+        "long_name": (long_name or "").strip() or None,
+        "club_name": (renamed.get("club_name") or "").strip() or None,
+        "league_name": (renamed.get("league_name") or "").strip() or None,
+        "player_positions": (renamed.get("player_positions") or "").strip() or None,
+        "nationality_name": (renamed.get("nationality_name") or "").strip() or None,
+        "extra_attributes": {},
+    }
+
+    for column in BASE_COLUMNS:
+        if column in {"short_name", "long_name", "club_name", "league_name", "player_positions", "nationality_name"}:
+            continue
+        value = renamed.get(column)
+        record[column] = to_int(value) if column in NUMERIC_COLUMNS else value
+
+    for column in BASE_COLUMNS:
+        if column not in record:
+            record[column] = None
+
+    record.setdefault("overall", None)
+    record.setdefault("potential", None)
+    record.setdefault("value_eur", None)
+    record.setdefault("wage_eur", None)
+    record.setdefault("release_clause_eur", None)
+    record.setdefault("height_cm", None)
+    record.setdefault("weight_kg", None)
+    record.setdefault("age", None)
+    record.setdefault("contract_valid_until", None)
+
+    extra_keys = set(renamed) - (BASE_COLUMNS | {"short_name", "long_name", "player_positions", "club_name", "league_name", "nationality_name", "player_url", "playerid_url"})
+    record["extra_attributes"] = {
+        key: renamed[key]
+        for key in sorted(extra_keys)
+        if renamed.get(key) not in {None, ""}
+    }
+
+    return record
+
+
+def iter_records(path: Path, *, year: int, gender: str) -> Iterator[Dict[str, object]]:
+    """Yield normalized player records for a given CSV file."""
+
+    with path.open("r", encoding="utf-8", newline="") as handle:
+        reader = csv.DictReader(handle)
+        for row in reader:
+            if not any(row.values()):
+                continue
+            yield normalize_record(row, year=year, gender=gender)
+
+
+def load_players(
+    data_dir: Path, file_map: Dict[str, Dict[int, str]]
+) -> Tuple[List[Dict[str, object]], Dict[str, Dict[str, Dict[str, str]]]]:
+    """Read all configured CSV files and return records plus metadata."""
+
+    records: List[Dict[str, object]] = []
+    metadata: Dict[str, Dict[str, Dict[str, str]]] = {}
 
     for group, entries in file_map.items():
         gender = "female" if group.lower().startswith("f") else "male"
@@ -163,22 +199,35 @@ def load_players(data_dir: Path, file_map: Dict[str, Dict[int, str]]) -> Tuple[p
             csv_path = data_dir / filename
             if not csv_path.exists():
                 raise FileNotFoundError(f"Expected dataset file not found: {csv_path}")
-            df = read_csv(csv_path)
-            frames.append(standardize_dataframe(df, year=year, gender=gender))
+            for record in iter_records(csv_path, year=year, gender=gender):
+                records.append(record)
             metadata.setdefault(str(year), {})[gender] = {
-                'file': filename,
-                'sha256': hash_file(csv_path),
+                "file": filename,
+                "sha256": hash_file(csv_path),
             }
 
-    unified = pd.concat(frames, axis=0, ignore_index=True)
-    unified = unified.sort_values(["year", "gender", "club_name", "short_name"])
-    return unified.reset_index(drop=True), metadata
+    deduplicated = {record["player_uid"]: record for record in records}
+    ordered = sorted(
+        deduplicated.values(),
+        key=lambda item: (
+            item["year"],
+            item["gender"],
+            item.get("club_name") or "",
+            item.get("short_name") or "",
+        ),
+    )
+    return ordered, metadata
 
 
-def compute_checksum(frame: pd.DataFrame) -> str:
-    """Compute a deterministic checksum for the dataframe content."""
+def compute_checksum(records: List[Dict[str, object]]) -> str:
+    """Compute a deterministic checksum for the normalized player records."""
 
-    payload = frame.sort_values("player_uid").to_json(orient="records", date_unit="s")
+    serializable = []
+    for record in sorted(records, key=lambda item: item["player_uid"]):
+        copy = {key: record[key] for key in record if key != "extra_attributes"}
+        copy["extra_attributes"] = record.get("extra_attributes", {})
+        serializable.append(copy)
+    payload = json.dumps(serializable, ensure_ascii=False, sort_keys=True)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
@@ -196,16 +245,16 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
 def main(argv: Iterable[str] | None = None) -> None:
     args = parse_args(argv)
     file_map = load_file_map(args.data_dir)
-    dataframe, metadata = load_players(args.data_dir, file_map)
-    checksum = compute_checksum(dataframe)
+    records, metadata = load_players(args.data_dir, file_map)
+    checksum = compute_checksum(records)
 
     db_config = get_database_config()
     engine = create_db_engine(db_config.url)
-    write_players_table(engine, dataframe)
+    write_players_table(engine, records)
     log_ingestion(
         engine,
-        row_count=len(dataframe),
-        years=sorted(dataframe["year"].unique().tolist()),
+        row_count=len(records),
+        years=sorted({int(record["year"]) for record in records}),
         source_files=metadata,
         checksum=checksum,
     )
@@ -213,8 +262,8 @@ def main(argv: Iterable[str] | None = None) -> None:
     print("Ingestion completed successfully.")
     print(json.dumps(
         {
-            "rows_loaded": len(dataframe),
-            "years": sorted(dataframe["year"].unique().tolist()),
+            "rows_loaded": len(records),
+            "years": sorted({int(record["year"]) for record in records}),
             "checksum": checksum,
         },
         indent=2,

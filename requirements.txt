@@ -1,8 +1,6 @@
-pandas>=2.0
 pyyaml>=6.0
 SQLAlchemy>=2.0
 psycopg2-binary>=2.9
-pyspark>=3.5
 python-dotenv>=1.0
 matplotlib>=3.8
 google-api-python-client>=2.130
