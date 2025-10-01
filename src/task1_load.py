@@ -12,12 +12,12 @@ if __package__ is None or __package__ == "":
     if str(PROJECT_ROOT) not in sys.path:
         sys.path.insert(0, str(PROJECT_ROOT))
 
-    from spark_compat import ensure_typing_submodules  # type: ignore
+    from spark_compat import ensure_typing_submodules  # Reference: conlsulted copilot for spark_compat.py
 
     ensure_typing_submodules()
 
-    from config import ConfigError, get_database_config, load_file_map  # type: ignore
-    from db_utils import create_db_engine, write_players_table  # type: ignore
+    from config import ConfigError, get_database_config, load_file_map 
+    from db_utils import create_db_engine, write_players_table  
 else:
     from .spark_compat import ensure_typing_submodules
 
@@ -194,7 +194,7 @@ SORT_COLUMNS = [
     "short_name",
 ]
 
-
+# Reference: conlsulted copilot for postgres jdbc jar loading logic
 def _resolve_postgres_jdbc_jar(project_root: Path) -> Path | None:
     """Return the newest PostgreSQL JDBC jar found locally or via environment."""
 
@@ -229,7 +229,7 @@ def _resolve_postgres_jdbc_jar(project_root: Path) -> Path | None:
 
     return max(unique_candidates, key=unique_candidates.get)
 
-
+# Reference: conlsulted copilot for postgres jdbc jar loading logic
 def _configure_postgres_driver(
     builder: SparkSession.Builder, project_root: Path
 ) -> SparkSession.Builder:
